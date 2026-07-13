@@ -1,0 +1,46 @@
+# Praxis — task runner (https://taskfile.dev). Run `task --list`.
+version: "3"
+
+tasks:
+  default:
+    silent: true
+    cmds: [task --list]
+
+  setup:
+    desc: Install gym-app dependencies (the web UI + server)
+    dir: gym-app
+    cmds:
+      - bun install
+
+  setup-sandbox:
+    desc: "Create the practice sandbox from the seed (run once before Module 1)"
+    cmds:
+      - cp -r sandbox-seed sandbox
+      - git -C sandbox init -q
+      - git -C sandbox add -A
+      - git -C sandbox commit -qm "baseline"
+
+  test:
+    desc: "Run YOUR practice reps (RED until you solve them)"
+    dir: sandbox
+    cmds:
+      - python -m unittest -v
+
+  app:
+    desc: "Build the web UI and serve the gym on http://localhost:4600"
+    dir: gym-app
+    cmds:
+      - bun run build:web
+      - bun run app
+
+  dev:
+    desc: "Run the gym in dev mode (server + Vite HMR in parallel)"
+    deps: [dev:server, dev:web]
+
+  dev:server:
+    dir: gym-app
+    cmds: [bun run dev:server]
+
+  dev:web:
+    dir: gym-app
+    cmds: [bun run dev:web]

@@ -1,0 +1,19 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Praxis">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8FB6FF"/>
+      <stop offset="1" stop-color="#5A8AF0"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="64" height="64" rx="15" fill="url(#g)"/>
+  <g fill="#ffffff">
+    <!-- left plates -->
+    <rect x="13" y="22" width="6" height="20" rx="3"/>
+    <rect x="20" y="26" width="4" height="12" rx="2"/>
+    <!-- bar -->
+    <rect x="24" y="29.5" width="16" height="5" rx="2.5"/>
+    <!-- right plates -->
+    <rect x="40" y="26" width="4" height="12" rx="2"/>
+    <rect x="45" y="22" width="6" height="20" rx="3"/>
+  </g>
+</svg>

@@ -1,0 +1,9 @@
+label: "demo"
+modules:
+  - slug: base-case
+    archetype: explanation
+  - slug: recursive-step
+    archetype: explanation
+  - slug: call-stack
+    archetype: explanation
+sandbox: null

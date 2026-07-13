@@ -1,0 +1,13 @@
+label: "claude-code-best-practices"
+modules:
+  - slug: context-window-constraint
+    archetype: explanation
+  - slug: verification-first
+    archetype: explanation
+  - slug: explore-plan-implement
+    archetype: attested
+  - slug: prompt-specificity
+    archetype: explanation
+  - slug: session-hygiene-and-scaling
+    archetype: explanation
+sandbox: null

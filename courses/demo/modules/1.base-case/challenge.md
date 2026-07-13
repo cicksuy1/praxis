@@ -1,0 +1,1 @@
+Write a one-paragraph explanation of why removing the base case from a recursive function is dangerous. Then give a one-line example (any language, pseudocode is fine) of a valid base case for a function that sums a list of numbers.

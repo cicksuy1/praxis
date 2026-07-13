@@ -1,0 +1,1 @@
+Without running any code, trace through `total([3, 1, 2])` step by step, writing out each function call and the value it returns. Then explain, in plain English, why the recursive step must always move toward the base case.

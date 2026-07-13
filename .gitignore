@@ -1,0 +1,7 @@
+node_modules/
+gym-app/node_modules/
+gym-app/web/dist/
+gym-app/.session.json
+gym-app/.chats/
+progress/*.local.md
+sandbox/

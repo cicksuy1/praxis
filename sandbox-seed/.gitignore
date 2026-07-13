@@ -1,0 +1,6 @@
+# Keep the learner's `git diff` clean so the proof-of-work check reads only real work.
+__pycache__/
+*.pyc
+# Exported session transcript (Praxis plumbing — spot/verify read it as coaching evidence
+# only, never the pass gate; learner-private).
+.claude/last-session.jsonl

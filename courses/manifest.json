@@ -1,0 +1,16 @@
+{
+  "courses": [
+    {
+      "slug": "demo",
+      "label": "demo",
+      "moduleCount": 3,
+      "createdAt": "2026-07-09T12:19:19.403Z"
+    },
+    {
+      "slug": "defender-server-architecture",
+      "label": "Defender Server Architecture",
+      "moduleCount": 4,
+      "createdAt": "2026-07-13T13:00:12.258Z"
+    }
+  ]
+}

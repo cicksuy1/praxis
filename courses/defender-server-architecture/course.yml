@@ -1,0 +1,11 @@
+label: "Defender Server Architecture"
+modules:
+  - slug: two-process-model
+    archetype: explanation
+  - slug: hub-loops-data-plane
+    archetype: explanation
+  - slug: cryptographic-layers
+    archetype: explanation
+  - slug: endpoints-data-model-acl
+    archetype: explanation
+sandbox: null
