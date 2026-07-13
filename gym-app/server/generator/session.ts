@@ -4,12 +4,25 @@
 // lazily so the rest of the server + tests run without it installed.
 import { repoRoot } from "../files.ts";
 import { broadcast, formatToolActivity, extractText } from "../tutor.ts";
-import { CourseSpecSchema, type CourseSpec } from "./schema.ts";
-import type { Extracted } from "./ingest.ts";
+import { CourseSpecSchema, type CourseSpec, type Mode } from "./schema.ts";
+import {
+  type Extracted,
+  segmentMarkdown,
+  normalizeSections,
+  TARGET_MAX_TOKENS,
+} from "./ingest.ts";
 
 const PLANNER_TOOLS = ["Read", "Glob", "Grep", "Skill"];
 const MAX_TURNS = 60;
 const PLANNER_MODEL = "sonnet";
+
+/** Default per-Module context budget (ADR-0010); the user can raise it on the proposal page. */
+export const DEFAULT_BUDGET_TOKENS = TARGET_MAX_TOKENS;
+
+export interface GenerateOptions {
+  mode?: Mode; // default "author" — the existing behaviour behind the toggle
+  budgetTokens?: number; // per-Module context-budget ceiling (ADR-0010)
+}
 
 export interface GenerateResult {
   ok: boolean;
@@ -17,18 +30,82 @@ export interface GenerateResult {
   error?: string;
 }
 
-function driver(label: string, corpus: string, priorError: string | null): string {
+/** Mode-specific authoring contract appended to the planner prompt. */
+function modeContract(mode: Mode): string {
+  if (mode === "guide") {
+    return (
+      `\n\nMODE: guide. The source below is pre-cut into VERBATIM sections. For each Module, set ` +
+      `\`resource\` to the EXACT verbatim text of the chosen section(s) — copy it character-for-` +
+      `character; never rewrite, summarise, or paraphrase. Do NOT provide a \`lesson\`. You author ` +
+      `only the *assessment*: 1–3 cold \`recall\` questions (required for \`internalise\` Modules) and ` +
+      `an optional \`challenge\`. Choose a \`coverage\` tag (\`internalise\` | \`reference\`) and carry ` +
+      `each section's \`locator\`. Stamp \`"mode": "guide"\` on the Course.`
+    );
+  }
+  return (
+    `\n\nMODE: author. For each Module author a distilled \`lesson\` (why-first markdown, no recall ` +
+    `section — the emitter appends it) and 1–3 cold \`recall\` questions. Do NOT provide a \`resource\`. ` +
+    `Stamp \`"mode": "author"\` on the Course.`
+  );
+}
+
+export function driver(
+  label: string,
+  corpus: string,
+  priorError: string | null,
+  mode: Mode,
+  budgetTokens: number,
+): string {
   const retry = priorError
     ? `\n\nYour previous attempt FAILED validation: ${priorError}\nFix exactly those problems and re-emit the complete JSON.`
     : "";
+  const budget =
+    `\n\nContext budget: keep each Module's loaded reading material within roughly ` +
+    `${budgetTokens} tokens. Merge thin slices; flag anything much larger rather than bloating a Module.`;
   return (
     `You are the Praxis Generator. Build a Course from the source material below, ` +
     `labelled "${label}". Invoke the \`generate\` skill and follow it exactly. ` +
     `You may Read repo files (AGENTS.md, CONTEXT.md, docs/adr) for Praxis conventions, ` +
-    `but do NOT attempt to write anything — a separate deterministic step writes the files.\n\n` +
-    `Return ONLY the CourseSpec as your final message: a single fenced \`\`\`json code block, ` +
+    `but do NOT attempt to write anything — a separate deterministic step writes the files.` +
+    modeContract(mode) +
+    budget +
+    `\n\nReturn ONLY the CourseSpec as your final message: a single fenced \`\`\`json code block, ` +
     `with no prose after it.${retry}\n\n=== SOURCE MATERIAL ===\n\n${corpus}`
   );
+}
+
+/** Locator label for a section, shown to the planner (and later the proposal page). */
+function locatorLabel(headingPath: string[], line: number): string {
+  if (line === 0) return "preamble";
+  return `${headingPath.join(" › ")} (line ${line})`;
+}
+
+/**
+ * Shape the source for the planner by mode. Author mode hands over the raw file text.
+ * Guide mode pre-cuts each file into normalized verbatim sections (ingest section tree)
+ * and numbers them with locators + token budgets, so the planner copies exact slices
+ * rather than reproducing prose from memory (keeps `resource` truly verbatim).
+ */
+export function corpusFor(mode: Mode, sources: Extracted[]): string {
+  if (mode === "author") {
+    return sources.map((s) => `### FILE: ${s.name}\n\n${s.content}`).join("\n\n---\n\n");
+  }
+  let n = 0;
+  const blocks: string[] = [];
+  for (const s of sources) {
+    const sections = normalizeSections(segmentMarkdown(s.content, "read"));
+    const parts = sections.map((sec) => {
+      n += 1;
+      const flag = sec.oversize ? " · OVERSIZE (consider splitting)" : "";
+      return (
+        `[section ${n}] "${sec.title}" · ${locatorLabel(sec.headingPath, sec.line)} · ` +
+        `confidence ${sec.confidence} · ~${sec.tokens} tokens${flag}\n` +
+        `<<<VERBATIM\n${sec.content}\n>>>VERBATIM`
+      );
+    });
+    blocks.push(`### FILE: ${s.name}\n\n${parts.join("\n\n")}`);
+  }
+  return blocks.join("\n\n---\n\n");
 }
 
 /** Run the read-only planner once; return its concatenated assistant text. */
@@ -91,17 +168,23 @@ export function extractJson(text: string): unknown | null {
 }
 
 /** Plan a Course from ingested sources. Validates the model output; retries once. */
-export async function generateCourse(label: string, sources: Extracted[]): Promise<GenerateResult> {
+export async function generateCourse(
+  label: string,
+  sources: Extracted[],
+  opts: GenerateOptions = {},
+): Promise<GenerateResult> {
+  const mode: Mode = opts.mode ?? "author";
+  const budgetTokens = opts.budgetTokens ?? DEFAULT_BUDGET_TOKENS;
   const usable = sources.filter((s) => s.status === "ok" && s.content.trim());
   if (usable.length === 0) return { ok: false, error: "no readable source files (need .md/.txt/.docx)" };
-  const corpus = usable.map((s) => `### FILE: ${s.name}\n\n${s.content}`).join("\n\n---\n\n");
+  const corpus = corpusFor(mode, usable);
 
   let lastError = "";
   for (let attempt = 1; attempt <= 2; attempt++) {
-    broadcast("course_progress", { phase: "planning", attempt });
+    broadcast("course_progress", { phase: "planning", attempt, mode });
     let raw: string;
     try {
-      raw = await runPlanner(driver(label, corpus, attempt === 2 ? lastError : null));
+      raw = await runPlanner(driver(label, corpus, attempt === 2 ? lastError : null, mode, budgetTokens));
     } catch (e) {
       return { ok: false, error: `planner error: ${(e as Error).message}` };
     }
