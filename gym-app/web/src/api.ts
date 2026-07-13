@@ -77,6 +77,50 @@ export interface TutorStatus {
   model: string | null;
 }
 
+export type Mode = "guide" | "author";
+export type Coverage = "internalise" | "reference";
+
+/** Where a guide-mode resource was sliced from — shown for context on the proposal. */
+export type Locator =
+  | { kind: "heading"; headingPath: string[]; line: number }
+  | { kind: "page"; page: number };
+
+/** A proposed Module (mirrors server ModuleSpec). Exactly one of resource | lesson. */
+export interface DraftModule {
+  number: number;
+  slug: string;
+  title: string;
+  principle: string;
+  archetype: "runnable" | "inspectable" | "attested" | "explanation";
+  coverage: Coverage;
+  locator?: Locator;
+  resource?: string;
+  lesson?: string;
+  challenge?: string;
+  recall: string[];
+}
+
+export interface DraftSpec {
+  label: string;
+  mode: Mode;
+  modules: DraftModule[];
+  sandbox: null;
+}
+
+/** A persisted proposal (mirrors server Draft) — the editable, refresh-safe plan. */
+export interface Draft {
+  id: string;
+  label: string;
+  mode: Mode;
+  budgetTokens: number;
+  sourceDir: string;
+  status: "proposed" | "emitted";
+  createdAt: string;
+  updatedAt: string;
+  emittedSlug?: string;
+  spec: DraftSpec;
+}
+
 type Envelope<T> = { success: boolean; data: T | null; error: string | null };
 
 async function unwrap<T>(res: Response): Promise<T> {
@@ -125,11 +169,11 @@ export const api = {
   resources: () => fetch("/api/resources").then((r) => unwrap<{ folders: ResourceFolder[] }>(r)),
   browse: (dir?: string) =>
     fetch(`/api/browse${dir ? `?path=${encodeURIComponent(dir)}` : ""}`).then((r) => unwrap<BrowseResult>(r)),
-  generateCourse: (sourceDir: string, label: string) =>
+  generateCourse: (sourceDir: string, label: string, mode: Mode, budgetTokens?: number) =>
     fetch("/api/course/generate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceDir, label }),
+      body: JSON.stringify({ sourceDir, label, mode, budgetTokens }),
     }),
   courses: () => fetch("/api/courses").then((r) => unwrap<{ courses: CourseEntry[] }>(r)),
   selectCourse: (slug: string) =>
@@ -139,6 +183,23 @@ export const api = {
       body: JSON.stringify({ slug }),
     }),
   deleteCourse: (slug: string) => fetch(`/api/courses/${encodeURIComponent(slug)}`, { method: "DELETE" }),
+
+  // Generation drafts (proposal page, ADR-0012).
+  getDraft: (id: string) =>
+    fetch(`/api/drafts/${encodeURIComponent(id)}`).then((r) => unwrap<{ draft: Draft }>(r)).then((d) => d.draft),
+  patchDraft: (id: string, patch: { label?: string; spec?: DraftSpec; budgetTokens?: number }) =>
+    fetch(`/api/drafts/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    }).then((r) => unwrap<{ draft: Draft }>(r)).then((d) => d.draft),
+  confirmDraft: (id: string) =>
+    fetch(`/api/drafts/${encodeURIComponent(id)}/confirm`, { method: "POST" }).then((r) =>
+      unwrap<{ slug: string; modules: number; firstSlug: string | null; label: string }>(r),
+    ),
+  regenerateDraft: (id: string) =>
+    fetch(`/api/drafts/${encodeURIComponent(id)}/regenerate`, { method: "POST" }),
+  deleteDraft: (id: string) => fetch(`/api/drafts/${encodeURIComponent(id)}`, { method: "DELETE" }),
 };
 
 /** Subscribe to the SSE event stream. Returns an unsubscribe fn. */

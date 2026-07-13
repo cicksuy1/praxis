@@ -13,8 +13,14 @@ import {
   type CourseEntry,
 } from "./api.ts";
 import { CreatePage } from "./CreatePage.tsx";
+import { ProposalPage } from "./ProposalPage.tsx";
 
 type Tab = "lesson" | "drill" | "challenge";
+type View = "home" | "proposal" | "learn";
+
+// A generated proposal is persisted server-side; remembering its id here keeps a
+// browser refresh on the proposal page from bouncing back to the create screen.
+const PROPOSAL_KEY = "praxis.proposalDraftId";
 
 const SIDEBAR = { min: 210, max: 460, default: 296 };
 const CHAT = { min: 320, max: 820, default: 430 };
@@ -35,7 +41,8 @@ export function App() {
   const [celebrating, setCelebrating] = useState(false);
   const [model, setModel] = useState("sonnet");
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<"home" | "learn">("home");
+  const [draftId, setDraftId] = useState<string | null>(() => localStorage.getItem(PROPOSAL_KEY));
+  const [view, setView] = useState<View>(() => (localStorage.getItem(PROPOSAL_KEY) ? "proposal" : "home"));
   const [courses, setCourses] = useState<CourseEntry[]>([]);
   const { theme, toggle: toggleTheme } = useTheme();
 
@@ -192,18 +199,37 @@ export function App() {
     chatTrack,
   ].join(" ");
 
+  // create → proposal → learn. The proposal id is mirrored to localStorage so a
+  // refresh reopens the same (server-persisted) proposal instead of regenerating.
+  const goHome = () => {
+    localStorage.removeItem(PROPOSAL_KEY);
+    setDraftId(null);
+    setView("home");
+  };
+  const enterLearning = (firstSlug: string | null) => {
+    localStorage.removeItem(PROPOSAL_KEY);
+    setDraftId(null);
+    api.courses().then((c) => setCourses(c.courses)).catch(() => {});
+    setView("learn");
+    if (firstSlug) openModule(firstSlug);
+  };
+
   if (view === "home") {
     return (
       <CreatePage
         onOpenCourse={openCourse}
-        onDone={(firstSlug) => {
-          api.courses().then((c) => setCourses(c.courses)).catch(() => {});
-          setView("learn");
-          if (firstSlug) openModule(firstSlug);
+        onProposed={(id) => {
+          localStorage.setItem(PROPOSAL_KEY, id);
+          setDraftId(id);
+          setView("proposal");
         }}
         onBack={() => setView("learn")}
       />
     );
+  }
+
+  if (view === "proposal" && draftId) {
+    return <ProposalPage draftId={draftId} onConfirmed={enterLearning} onDiscard={goHome} />;
   }
 
   return (

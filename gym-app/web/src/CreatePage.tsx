@@ -1,18 +1,21 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { api, subscribe, type ResourceFolder, type BrowseResult, type CourseEntry } from "./api.ts";
+import { api, subscribe, type Mode, type ResourceFolder, type BrowseResult, type CourseEntry } from "./api.ts";
 
 interface CreatePageProps {
-  onDone: (firstSlug: string | null) => void;
+  onProposed: (draftId: string) => void;
   onOpenCourse: (slug: string) => void;
   onBack: () => void;
 }
 
-type Phase = "idle" | "running" | "done" | "error";
-interface BuiltCourse {
-  label: string;
-  modules: number;
-  firstSlug: string | null;
-}
+type Phase = "idle" | "running" | "error";
+
+/** Per-Module reading budget (ADR-0010): a default floor the user may raise, bounded. */
+const BUDGET_OPTIONS: { tokens: number; label: string; hint: string }[] = [
+  { tokens: 8000, label: "Standard", hint: "~8K tokens / module" },
+  { tokens: 12000, label: "Larger", hint: "~12K tokens / module" },
+  { tokens: 16000, label: "Largest", hint: "~16K tokens / module" },
+];
+const DEFAULT_BUDGET = 8000;
 
 /** Human line for a course_progress SSE event that carries a phase (not an activity). */
 function phaseLine(d: Record<string, any>): string {
@@ -39,15 +42,16 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? "";
 }
 
-export function CreatePage({ onDone, onOpenCourse, onBack }: CreatePageProps) {
+export function CreatePage({ onProposed, onOpenCourse, onBack }: CreatePageProps) {
   const [courses, setCourses] = useState<CourseEntry[]>([]);
   const [folders, setFolders] = useState<ResourceFolder[]>([]);
   const [sourceDir, setSourceDir] = useState("");
   const [label, setLabel] = useState("");
+  const [mode, setMode] = useState<Mode>("author");
+  const [budget, setBudget] = useState<number>(DEFAULT_BUDGET);
   const [phase, setPhase] = useState<Phase>("idle");
   const [log, setLog] = useState<string[]>([]);
   const [error, setError] = useState("");
-  const [built, setBuilt] = useState<BuiltCourse | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [browse, setBrowse] = useState<BrowseResult | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
@@ -70,11 +74,11 @@ export function CreatePage({ onDone, onOpenCourse, onBack }: CreatePageProps) {
     const push = (line: string) => setLog((l) => [...l, line]);
     const unsub = subscribe({
       course_progress: (d) => push(d.activity ? d.activity : phaseLine(d)),
-      course_done: (d) => {
-        push(`✅ Built "${d.label}" — ${d.modules} module(s).`);
-        setBuilt({ label: d.label, modules: d.modules, firstSlug: d.firstSlug ?? null });
-        setPhase("done");
-        loadCourses();
+      // The plan is persisted as a draft — hand off to the proposal page to review
+      // and confirm (nothing is written to the library until then).
+      course_proposed: (d) => {
+        push(`🧾 Proposed "${d.label}" — ${d.modules} module(s). Review before building.`);
+        if (d.draftId) onProposed(d.draftId);
       },
       course_error: (d) => {
         setError(d.error ?? "generation failed");
@@ -120,9 +124,9 @@ export function CreatePage({ onDone, onOpenCourse, onBack }: CreatePageProps) {
     if (!dir || !lbl) return;
     setLog([]);
     setError("");
-    setBuilt(null);
     setPhase("running");
-    api.generateCourse(dir, lbl).catch((e) => {
+    const budgetTokens = budget === DEFAULT_BUDGET ? undefined : budget;
+    api.generateCourse(dir, lbl, mode, budgetTokens).catch((e) => {
       setError(e instanceof Error ? e.message : String(e));
       setPhase("error");
     });
@@ -131,37 +135,6 @@ export function CreatePage({ onDone, onOpenCourse, onBack }: CreatePageProps) {
   const running = phase === "running";
   const canGenerate = !running && Boolean(sourceDir.trim()) && Boolean(label.trim());
   const statusLine = log.length ? log[log.length - 1] : "Working…";
-
-  // Success screen — the build finished; let the learner choose to enter.
-  if (phase === "done" && built) {
-    return (
-      <div style={pageStyle}>
-        <div style={{ ...cardStyle, alignItems: "center", textAlign: "center", gap: 18 }}>
-          <div style={{ fontSize: 44 }}>🎉</div>
-          <h1 style={{ margin: 0 }}>“{built.label}” is ready</h1>
-          <p style={{ opacity: 0.7, margin: 0 }}>
-            {built.modules} module{built.modules === 1 ? "" : "s"} built and saved to your courses. The
-            coach will teach it and gate you on evidence.
-          </p>
-          <div style={{ display: "flex", gap: 10 }}>
-            <button style={primaryBtn} onClick={() => onDone(built.firstSlug)}>
-              Start learning →
-            </button>
-            <button
-              style={ghostBtn}
-              onClick={() => {
-                setPhase("idle");
-                setLog([]);
-                setBuilt(null);
-              }}
-            >
-              Build another
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div style={pageStyle}>
@@ -296,9 +269,47 @@ export function CreatePage({ onDone, onOpenCourse, onBack }: CreatePageProps) {
           />
         </section>
 
+        <section>
+          <h3 style={h3Style}>3 · Choose how it's built</h3>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              style={mode === "guide" ? modeBtnActive : modeBtn}
+              onClick={() => setMode("guide")}
+              disabled={running}
+            >
+              <strong>Guide</strong>
+              <span style={modeHint}>Keep the source verbatim as the reading, add assessment.</span>
+            </button>
+            <button
+              style={mode === "author" ? modeBtnActive : modeBtn}
+              onClick={() => setMode("author")}
+              disabled={running}
+            >
+              <strong>Author</strong>
+              <span style={modeHint}>Write an original lesson that teaches from the source.</span>
+            </button>
+          </div>
+
+          <label style={fieldLabel}>Reading size per module</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            {BUDGET_OPTIONS.map((b) => (
+              <button
+                key={b.tokens}
+                style={budget === b.tokens ? budgetBtnActive : budgetBtn}
+                onClick={() => setBudget(b.tokens)}
+                disabled={running}
+                title={b.hint}
+              >
+                <strong>{b.label}</strong>
+                <span style={{ opacity: 0.6, fontSize: 11 }}>{b.hint}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+
         {!running && (
           <button style={{ ...primaryBtn, opacity: canGenerate ? 1 : 0.5 }} onClick={generate} disabled={!canGenerate}>
-            Generate course
+            Generate proposal →
           </button>
         )}
 
@@ -379,6 +390,34 @@ const folderBtn: CSSProperties = {
   cursor: "pointer",
 };
 const folderBtnActive: CSSProperties = { ...folderBtn, borderColor: "#3b82f6", background: "rgba(59,130,246,0.12)" };
+const modeBtn: CSSProperties = {
+  flex: 1,
+  display: "flex",
+  flexDirection: "column",
+  gap: 4,
+  padding: "12px 14px",
+  borderRadius: 10,
+  border: "1px solid rgba(128,128,128,0.35)",
+  background: "transparent",
+  color: "inherit",
+  cursor: "pointer",
+  textAlign: "left",
+};
+const modeBtnActive: CSSProperties = { ...modeBtn, borderColor: "#3b82f6", background: "rgba(59,130,246,0.12)" };
+const modeHint: CSSProperties = { opacity: 0.65, fontSize: 12, lineHeight: 1.4 };
+const budgetBtn: CSSProperties = {
+  flex: 1,
+  display: "flex",
+  flexDirection: "column",
+  gap: 2,
+  padding: "8px 12px",
+  borderRadius: 8,
+  border: "1px solid rgba(128,128,128,0.35)",
+  background: "transparent",
+  color: "inherit",
+  cursor: "pointer",
+};
+const budgetBtnActive: CSSProperties = { ...budgetBtn, borderColor: "#3b82f6", background: "rgba(59,130,246,0.12)" };
 const courseCard: CSSProperties = {
   minWidth: 180,
   padding: "12px 14px",
