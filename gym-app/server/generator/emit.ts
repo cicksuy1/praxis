@@ -34,28 +34,38 @@ function curriculumMarkdown(spec: CourseSpec): string {
   ].join("\n");
 }
 
-/** Lesson body + the emitter-guaranteed "## 🧠 Active recall" section. */
-function lessonMarkdown(m: ModuleSpec): string {
+/** A Module's reading material for `lesson.md` — the same filename in both modes so the
+ * reader (content.ts) is mode-agnostic. Body is the verbatim `resource` (guide) or the
+ * authored `lesson` (author). The emitter appends "## 🧠 Active recall" only when the
+ * Module is gated (has recall); `reference` Modules carry no recall and stay ungated. */
+function moduleBody(m: ModuleSpec): string {
+  const body = (m.resource ?? m.lesson ?? "").trim();
+  if (m.recall.length === 0) return `${body}\n`;
   const recall = m.recall.map((q, i) => `${i + 1}. ${q}`).join("\n");
-  return `${m.lesson.trim()}\n\n## 🧠 Active recall\n\n${recall}\n`;
+  return `${body}\n\n## 🧠 Active recall\n\n${recall}\n`;
 }
 
-/** Per-Course manifest: archetypes now; Floor-check commands land in M2. */
+/** Per-Course manifest: mode + archetypes + coverage now; Floor-check commands land in M2. */
 function courseYaml(spec: CourseSpec): string {
-  const lines = [`label: ${JSON.stringify(spec.label)}`, "modules:"];
+  const lines = [`label: ${JSON.stringify(spec.label)}`, `mode: ${spec.mode}`, "modules:"];
   for (const m of spec.modules) {
     lines.push(`  - slug: ${m.slug}`);
     lines.push(`    archetype: ${m.archetype}`);
+    lines.push(`    coverage: ${m.coverage}`);
   }
   lines.push("sandbox: null");
   return `${lines.join("\n")}\n`;
 }
 
 export async function emitCourse(spec: CourseSpec): Promise<EmitResult> {
-  // Defense in depth beyond zod: every Module must teach and must gate on Recall.
+  // Defense in depth beyond zod: every Module carries reading material, and every
+  // `internalise` Module gates on at least one Recall (`reference` is ungated by design).
   for (const m of spec.modules) {
-    if (!m.lesson.trim()) return { ok: false, modules: 0, error: `module ${m.slug} has an empty lesson` };
-    if (m.recall.length === 0) return { ok: false, modules: 0, error: `module ${m.slug} has no recall` };
+    const body = (m.resource ?? m.lesson ?? "").trim();
+    if (!body) return { ok: false, modules: 0, error: `module ${m.slug} has no reading material` };
+    if (m.coverage === "internalise" && m.recall.length === 0) {
+      return { ok: false, modules: 0, error: `module ${m.slug} is internalise but has no recall` };
+    }
   }
 
   const slug = await slugify(spec.label);
@@ -67,7 +77,7 @@ export async function emitCourse(spec: CourseSpec): Promise<EmitResult> {
     for (const m of spec.modules) {
       const mdir = path.join(dir, "modules", `${m.number}.${m.slug}`);
       await mkdir(mdir, { recursive: true });
-      await writeFile(path.join(mdir, "lesson.md"), lessonMarkdown(m), "utf8");
+      await writeFile(path.join(mdir, "lesson.md"), moduleBody(m), "utf8");
       if (m.challenge?.trim()) {
         await writeFile(path.join(mdir, "challenge.md"), `${m.challenge.trim()}\n`, "utf8");
       }
