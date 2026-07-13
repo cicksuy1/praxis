@@ -20,3 +20,23 @@ Working notes behind [ADR-0001](adr/0001-generator-guide-default-author-toggle.m
 - `gym-app/server/generator/{ingest,session,emit}.ts` + `.claude/skills/generate/SKILL.md`.
 - `ingest.ts` currently returns flat text (no structure) — Guide mode needs structure-aware extraction here.
 - `emit.ts` writes the Course; the mode flag threads ingest → session → emit → the generate skill → a web toggle.
+
+## Build plan (all four questions resolved)
+
+Built on worktree branch `feat/generator-guide-mode` off `dev`. Conductor untouched; Author mode =
+existing behaviour behind the toggle. Flow is **plan → persisted proposal → confirm → emit**
+([ADR-0012](adr/0012-generation-plan-persist-confirm-emit.md)); both modes converge on identical
+markdown, so the learning UI is shared.
+
+1. `schema.ts` — add `mode` (guide/author); `lesson` → optional + verbatim `resource` (exactly one
+   per mode); `coverage` tag + section `locator`; context-budget.
+2. `ingest.ts` — return a **section tree** (verbatim slice + title + locator + confidence); tiered
+   extraction (md headings; `.docx` via structure-preserving mammoth); named merge/split constants.
+3. `session.ts` — thread mode + budget; Guide path authors assessment-only.
+4. draft store + `emit.ts` — persist proposal (refresh-safe), confirm-gated emit; `resource` vs
+   `lesson` by mode; coverage-aware (`reference` ungated, `skip` no Module).
+5. `generate` SKILL.md — mode branch + coverage-proposal/confirm contract.
+6. Web — Create page (mode toggle + budget) → Proposal page (editable, refresh-safe) → learning UI.
+
+**Scope:** `.md`/`.docx` first; **PDF deferred to a follow-up** (page-tracking + the ADR-0008
+Tier-3 boundary pass).
