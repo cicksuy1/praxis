@@ -14,10 +14,19 @@ import {
   broadcast,
 } from "./tutor.ts";
 import { ingestDir } from "./generator/ingest.ts";
-import { generateCourse } from "./generator/session.ts";
+import { generateCourse, DEFAULT_BUDGET_TOKENS } from "./generator/session.ts";
 import { emitCourse } from "./generator/emit.ts";
 import { scanResources, browseDir, resolveSourceDir } from "./generator/intake.ts";
 import { listCourses, registerCourse, selectCourse, deleteCourse } from "./courses.ts";
+import type { Mode, CourseSpec } from "./generator/schema.ts";
+import {
+  createDraft,
+  getDraft,
+  listDrafts,
+  patchDraft,
+  markEmitted,
+  deleteDraft,
+} from "./generator/drafts.ts";
 
 const ok = (data: unknown) => ({ success: true, data, error: null });
 const fail = (error: string) => ({ success: false, data: null, error });
@@ -44,46 +53,99 @@ function curriculumPayload() {
 }
 
 /**
- * Ingest → plan → emit a Course, streaming progress over SSE. Fire-and-forget:
- * the endpoint returns 202 immediately and the client watches the event stream.
+ * Ingest → plan → persist a proposal (ADR-0012). Fire-and-forget over SSE: the endpoint
+ * returns 202 and the client watches for `course_proposed` (carrying the draft id). No
+ * files are written to the library until the user confirms the draft.
  */
-async function runCourseBuild(sourceDir: string, label: string): Promise<void> {
+async function runCourseProposal(
+  sourceDir: string,
+  label: string,
+  mode: Mode,
+  budgetTokens: number,
+): Promise<void> {
   try {
-    broadcast("course_progress", { phase: "ingesting" });
+    broadcast("course_progress", { phase: "ingesting", mode });
     const sources = await ingestDir(sourceDir);
     const okCount = sources.filter((s) => s.status === "ok").length;
     broadcast("course_progress", { phase: "ingested", files: sources.length, ok: okCount });
 
-    const gen = await generateCourse(label, sources);
+    const gen = await generateCourse(label, sources, { mode, budgetTokens });
     if (!gen.ok || !gen.spec) {
       broadcast("course_error", { error: gen.error ?? "generation failed" });
       return;
     }
 
-    broadcast("course_progress", { phase: "emitting", modules: gen.spec.modules.length });
-    const result = await emitCourse(gen.spec);
-    if (!result.ok || !result.slug) {
-      broadcast("course_error", { error: result.error ?? "emit failed" });
-      return;
-    }
-    await registerCourse({
-      slug: result.slug,
+    const draft = await createDraft({
       label: gen.spec.label,
-      moduleCount: result.modules,
-      createdAt: new Date().toISOString(),
+      mode: gen.spec.mode,
+      budgetTokens,
+      sourceDir,
+      spec: gen.spec,
     });
-    await selectCourse(result.slug); // make the new course active (mirror to root)
-
-    broadcast("course_done", {
-      label: gen.spec.label,
-      slug: result.slug,
-      modules: result.modules,
-      firstSlug: gen.spec.modules[0]?.slug ?? null,
+    broadcast("course_proposed", {
+      draftId: draft.id,
+      label: draft.label,
+      mode: draft.mode,
+      modules: gen.spec.modules.length,
     });
-    broadcast("progress_changed", {}); // nudge the UI to re-fetch curriculum/progress
   } catch (e) {
     broadcast("course_error", { error: (e as Error).message });
   }
+}
+
+/** Re-plan an existing draft from its stored inputs, replacing the proposed spec. */
+async function runCourseRegenerate(id: string): Promise<void> {
+  try {
+    const draft = await getDraft(id);
+    if (!draft) return;
+    broadcast("course_progress", { phase: "ingesting", mode: draft.mode });
+    const sources = await ingestDir(draft.sourceDir);
+    const gen = await generateCourse(draft.label, sources, {
+      mode: draft.mode,
+      budgetTokens: draft.budgetTokens,
+    });
+    if (!gen.ok || !gen.spec) {
+      broadcast("course_error", { error: gen.error ?? "generation failed" });
+      return;
+    }
+    await patchDraft(id, { label: gen.spec.label, spec: gen.spec });
+    broadcast("course_proposed", {
+      draftId: id,
+      label: gen.spec.label,
+      mode: gen.spec.mode,
+      modules: gen.spec.modules.length,
+    });
+  } catch (e) {
+    broadcast("course_error", { error: (e as Error).message });
+  }
+}
+
+/**
+ * Confirm-gated emit: write a proposed draft to the Course library, make it active, and
+ * mark the draft emitted. Synchronous (no model call) — returns the emitted slug.
+ */
+async function confirmDraft(
+  id: string,
+): Promise<{ ok: boolean; error?: string; slug?: string; modules?: number; firstSlug?: string | null; label?: string }> {
+  const draft = await getDraft(id);
+  if (!draft) return { ok: false, error: `draft not found: ${id}` };
+
+  const result = await emitCourse(draft.spec);
+  if (!result.ok || !result.slug) return { ok: false, error: result.error ?? "emit failed" };
+
+  await registerCourse({
+    slug: result.slug,
+    label: draft.spec.label,
+    moduleCount: result.modules,
+    createdAt: new Date().toISOString(),
+  });
+  await selectCourse(result.slug); // make the new course active (mirror to root)
+  await markEmitted(id, result.slug);
+
+  const firstSlug = draft.spec.modules[0]?.slug ?? null;
+  broadcast("course_done", { label: draft.spec.label, slug: result.slug, modules: result.modules, firstSlug });
+  broadcast("progress_changed", {}); // nudge the UI to re-fetch curriculum/progress
+  return { ok: true, slug: result.slug, modules: result.modules, firstSlug, label: draft.spec.label };
 }
 
 /**
@@ -153,8 +215,45 @@ export async function handleApi(req: Request): Promise<Response | null> {
     if (!label) return json(fail("label is required"), 400);
     const sourceDir = resolveSourceDir(rawDir);
     if (!sourceDir) return json(fail("sourceDir must be a folder inside the browse root"), 400);
-    void runCourseBuild(sourceDir, label);
-    return json(ok({ accepted: true }), 202);
+    const mode: Mode = body.mode === "guide" ? "guide" : "author";
+    const budgetTokens =
+      typeof body.budgetTokens === "number" && body.budgetTokens > 0 ? body.budgetTokens : undefined;
+    void runCourseProposal(sourceDir, label, mode, budgetTokens ?? DEFAULT_BUDGET_TOKENS);
+    return json(ok({ accepted: true, mode }), 202);
+  }
+
+  // ---- generation drafts (proposal page, ADR-0012) ------------------------
+  if (seg[1] === "drafts") {
+    if (method === "GET" && !seg[2]) return json(ok({ drafts: await listDrafts() }));
+    if (seg[2]) {
+      const id = decodeURIComponent(seg[2]);
+      if (method === "GET" && !seg[3]) {
+        const draft = await getDraft(id);
+        return draft ? json(ok({ draft })) : json(fail(`draft not found: ${id}`), 404);
+      }
+      if (method === "PATCH" && !seg[3]) {
+        const body = await readJsonBody(req);
+        const patch: { label?: string; spec?: CourseSpec; budgetTokens?: number } = {};
+        if (typeof body.label === "string") patch.label = body.label.trim();
+        if (body.spec && typeof body.spec === "object") patch.spec = body.spec as CourseSpec;
+        if (typeof body.budgetTokens === "number") patch.budgetTokens = body.budgetTokens;
+        const r = await patchDraft(id, patch);
+        return r.ok ? json(ok({ draft: r.draft })) : json(fail(r.error), 400);
+      }
+      if (method === "POST" && seg[3] === "confirm") {
+        const r = await confirmDraft(id);
+        if (!r.ok) return json(fail(r.error ?? "confirm failed"), r.error?.startsWith("draft not found") ? 404 : 400);
+        return json(ok({ slug: r.slug, modules: r.modules, firstSlug: r.firstSlug, label: r.label }));
+      }
+      if (method === "POST" && seg[3] === "regenerate") {
+        if (!(await getDraft(id))) return json(fail(`draft not found: ${id}`), 404);
+        void runCourseRegenerate(id);
+        return json(ok({ accepted: true }), 202);
+      }
+      if (method === "DELETE" && !seg[3]) {
+        return json(ok({ deleted: await deleteDraft(id) }));
+      }
+    }
   }
 
   // ---- course library -----------------------------------------------------
